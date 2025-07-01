@@ -59,4 +59,22 @@ app.post('/scrape/annonce', async (req, res) => {
       return res.status(400).json({ error: 'URL invalide' });
     }
 
-    const data = await scrapeA
+    const data = await scrapeAnnonce(url);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    service: 'LeBonCoin Scraper API',
+    endpoints: {
+      'POST /scrape/annonce': 'Scraper une annonce'
+    }
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`API démarrée sur le port ${PORT}`);
+});
