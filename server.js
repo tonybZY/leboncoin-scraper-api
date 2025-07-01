@@ -1,12 +1,21 @@
 const express = require('express');
 const cors = require('cors');
 // Puppeteer est déjà disponible dans l'image Docker
-const puppeteer = require('/usr/local/share/.config/yarn/global/node_modules/puppeteer');
+let puppeteer;
+try {
+  puppeteer = require('puppeteer');
+} catch (e) {
+  // Chemin alternatif si le premier ne fonctionne pas
+  puppeteer = require('/usr/local/share/.config/yarn/global/node_modules/puppeteer');
+}
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-// ... reste du code identique
+
+const PORT = process.env.PORT || 3000;
+
+// Configuration Puppeteer optimisée pour Docker
 const browserConfig = {
   headless: 'new',
   args: [
@@ -18,7 +27,8 @@ const browserConfig = {
     '--no-zygote',
     '--single-process',
     '--disable-accelerated-2d-canvas'
-  ]
+  ],
+  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable'
 };
 
 // Fonction de scraping avancée
@@ -85,16 +95,17 @@ async function scrapeLeBonCoin(url) {
         'a[data-test-id="ad"]',
         '[data-test-id="ad-card"]',
         '.styles_adCard__HQRFN',
-        'a[href*="/ad/"]'
+        'a[href*="/ad/"]',
+        '[data-qa-id="aditem_container"]'
       ];
       
       for (const selector of selectors) {
         const elements = document.querySelectorAll(selector);
         if (elements.length > 0) {
           elements.forEach(el => {
-            const titleEl = el.querySelector('[data-test-id="ad-title"], .styles_title__HQRFN, h3');
-            const priceEl = el.querySelector('[data-test-id="price"], .styles_price__HQRFN');
-            const locationEl = el.querySelector('[data-test-id="location"], .styles_location__HQRFN');
+            const titleEl = el.querySelector('[data-test-id="ad-title"], .styles_title__HQRFN, h3, [data-qa-id="aditem_title"]');
+            const priceEl = el.querySelector('[data-test-id="price"], .styles_price__HQRFN, [data-qa-id="aditem_price"]');
+            const locationEl = el.querySelector('[data-test-id="location"], .styles_location__HQRFN, [data-qa-id="aditem_location"]');
             const link = el.href || el.querySelector('a')?.href;
             
             if (titleEl && link) {
