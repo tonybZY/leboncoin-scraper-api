@@ -1,5 +1,5 @@
 const express = require('express');
-const axios = require('axios');
+const puppeteer = require('puppeteer');
 const cors = require('cors');
 
 const app = express();
@@ -8,48 +8,157 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Headers optimisés pour éviter la détection
-const getHeaders = () => ({
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-  'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Cache-Control': 'no-cache',
-  'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-  'Sec-Ch-Ua-Mobile': '?0',
-  'Sec-Ch-Ua-Platform': '"macOS"',
-  'Sec-Fetch-Dest': 'document',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Site': 'none',
-  'Sec-Fetch-User': '?1',
-  'Upgrade-Insecure-Requests': '1',
-  'Referer': 'https://www.google.com/'
-});
+// Configuration Puppeteer optimisée
+const browserConfig = {
+  headless: 'new',
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-zygote',
+    '--single-process',
+    '--disable-accelerated-2d-canvas'
+  ]
+};
 
-// Fonction pour extraire les données du JSON dans la page
-function extractDataFromHtml(html) {
+// Fonction de scraping avancée
+async function scrapeLeBonCoin(url) {
+  let browser;
   try {
-    // Le Bon Coin met les données dans un script JSON
-    const scriptMatch = html.match(/window\.FLUX_STATE\s*=\s*({.*?})\s*;/s);
-    if (scriptMatch) {
-      const jsonData = JSON.parse(scriptMatch[1]);
-      return jsonData;
+    browser = await puppeteer.launch(browserConfig);
+    const page = await browser.newPage();
+    
+    // Configuration avancée
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
+    // Éviter la détection
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      window.chrome = { runtime: {} };
+      Object.defineProperty(navigator, 'permissions', {
+        get: () => ({
+          query: () => Promise.resolve({ state: 'granted' })
+        })
+      });
+    });
+    
+    // Intercepter les requêtes inutiles
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+    
+    // Navigation avec gestion des erreurs
+    console.log('Navigation vers:', url);
+    await page.goto(url, { 
+      waitUntil: 'domcontentloaded', 
+      timeout: 60000 
+    });
+    
+    // Attendre que la page soit chargée
+    await page.waitForTimeout(3000);
+    
+    // Vérifier si on est bloqué
+    const isBlocked = await page.evaluate(() => {
+      return document.body.textContent.includes('Access denied') || 
+             document.title.includes('Attention Required');
+    });
+    
+    if (isBlocked) {
+      console.log('Détection Cloudflare, tentative de contournement...');
+      await page.waitForTimeout(5000);
     }
     
-    // Méthode alternative
-    const dataMatch = html.match(/<script[^>]*>window\.__INITIAL_STATE__=({.*?})<\/script>/);
-    if (dataMatch) {
-      return JSON.parse(dataMatch[1]);
-    }
+    // Extraire les données
+    const data = await page.evaluate(() => {
+      const annonces = [];
+      
+      // Sélecteurs multiples pour plus de robustesse
+      const selectors = [
+        'a[data-test-id="ad"]',
+        '[data-test-id="ad-card"]',
+        '.styles_adCard__HQRFN',
+        'a[href*="/ad/"]'
+      ];
+      
+      for (const selector of selectors) {
+        const elements = document.querySelectorAll(selector);
+        if (elements.length > 0) {
+          elements.forEach(el => {
+            const titleEl = el.querySelector('[data-test-id="ad-title"], .styles_title__HQRFN, h3');
+            const priceEl = el.querySelector('[data-test-id="price"], .styles_price__HQRFN');
+            const locationEl = el.querySelector('[data-test-id="location"], .styles_location__HQRFN');
+            const link = el.href || el.querySelector('a')?.href;
+            
+            if (titleEl && link) {
+              // Extraire le numéro de l'annonce
+              const idMatch = link.match(/\/(\d{9,})\.htm/);
+              const id = idMatch ? idMatch[1] : null;
+              
+              annonces.push({
+                id: id,
+                titre: titleEl.textContent.trim(),
+                prix: priceEl ? priceEl.textContent.trim() : 'Prix non spécifié',
+                localisation: locationEl ? locationEl.textContent.trim() : '',
+                lien: link.includes('http') ? link : `https://www.leboncoin.fr${link}`
+              });
+            }
+          });
+          break;
+        }
+      }
+      
+      // Extraire aussi depuis le JSON de la page si disponible
+      try {
+        const scripts = Array.from(document.querySelectorAll('script'));
+        for (const script of scripts) {
+          if (script.textContent.includes('window.FLUX_STATE')) {
+            const match = script.textContent.match(/window\.FLUX_STATE\s*=\s*({.*?});/s);
+            if (match) {
+              const fluxData = JSON.parse(match[1]);
+              console.log('FLUX_STATE trouvé');
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Erreur parsing FLUX_STATE:', e);
+      }
+      
+      return {
+        annonces: annonces,
+        pageTitle: document.title,
+        hasCloudflare: document.body.textContent.includes('Cloudflare')
+      };
+    });
     
-    return null;
+    await browser.close();
+    
+    return {
+      success: true,
+      url: url,
+      nombreAnnonces: data.annonces.length,
+      annonces: data.annonces,
+      pageTitle: data.pageTitle,
+      hasCloudflare: data.hasCloudflare
+    };
+    
   } catch (error) {
-    console.error('Erreur parsing JSON:', error);
-    return null;
+    if (browser) await browser.close();
+    console.error('Erreur scraping:', error);
+    throw error;
   }
 }
 
-// Route pour scraper
+// Route principale
 app.post('/scrape', async (req, res) => {
   try {
     const { url } = req.body;
@@ -57,80 +166,28 @@ app.post('/scrape', async (req, res) => {
     if (!url || !url.includes('leboncoin.fr')) {
       return res.status(400).json({ error: 'URL Le Bon Coin invalide' });
     }
-
-    console.log('Scraping:', url);
     
-    // Ajouter un délai aléatoire
-    await new Promise(resolve => setTimeout(resolve, Math.random() * 2000 + 1000));
-    
-    const response = await axios.get(url, {
-      headers: getHeaders(),
-      timeout: 30000,
-      maxRedirects: 5,
-      validateStatus: (status) => status < 500
-    });
-    
-    if (response.status === 403) {
-      return res.status(403).json({ 
-        error: 'Accès refusé par Le Bon Coin',
-        suggestion: 'Utilisez un service de proxy ou attendez quelques minutes'
-      });
-    }
-    
-    const html = response.data;
-    const jsonData = extractDataFromHtml(html);
-    
-    // Extraire les annonces basiquement
-    const annonceMatches = html.match(/<a[^>]*href="\/[^"]*\/(\d{10,})\.htm"[^>]*>.*?<\/a>/g) || [];
-    const annonces = annonceMatches.map(match => {
-      const idMatch = match.match(/\/(\d{10,})\.htm/);
-      return {
-        id: idMatch ? idMatch[1] : null,
-        lien: `https://www.leboncoin.fr${match.match(/href="([^"]+)"/)[1]}`
-      };
-    }).filter(a => a.id);
-    
-    res.json({
-      success: true,
-      url: url,
-      nombreAnnonces: annonces.length,
-      annonces: annonces.slice(0, 20),
-      hasData: !!jsonData,
-      timestamp: new Date().toISOString()
-    });
+    const data = await scrapeLeBonCoin(url);
+    res.json(data);
     
   } catch (error) {
-    console.error('Erreur:', error.message);
     res.status(500).json({ 
       error: error.message,
-      type: error.code || 'UNKNOWN_ERROR'
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
 
-// Route de test avec proxy
-app.post('/scrape-with-proxy', async (req, res) => {
-  res.json({
-    message: 'Pour un scraping fiable, utilisez un service comme ScrapingBee ou Scrapfly',
-    alternatives: [
-      'https://scrapingbee.com - 1000 requêtes gratuites',
-      'https://scrapfly.io - 1000 requêtes gratuites',
-      'https://scraperapi.com - 1000 requêtes gratuites'
-    ]
-  });
-});
-
 app.get('/', (req, res) => {
   res.json({
-    service: 'LeBonCoin Scraper API',
+    service: 'LeBonCoin Scraper avec Puppeteer (Docker)',
     endpoints: {
-      'POST /scrape': 'Scraper Le Bon Coin',
-      'POST /scrape-with-proxy': 'Infos sur les proxies'
+      'POST /scrape': 'Scraper Le Bon Coin'
     },
-    note: 'Le Bon Coin a des protections anti-scraping fortes'
+    status: 'ready'
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`API démarrée sur le port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Scraper API démarrée sur le port ${PORT}`);
 });
