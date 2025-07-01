@@ -1,14 +1,12 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
 const cors = require('cors');
+// Puppeteer est déjà disponible dans l'image Docker
+const puppeteer = require('/usr/local/share/.config/yarn/global/node_modules/puppeteer');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-const PORT = process.env.PORT || 3000;
-
-// Configuration Puppeteer optimisée
+// ... reste du code identique
 const browserConfig = {
   headless: 'new',
   args: [
