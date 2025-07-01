@@ -1,5 +1,5 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const playwright = require('playwright');
 const cors = require('cors');
 
 const app = express();
@@ -8,65 +8,39 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Fonction pour scraper avec Puppeteer
+// Fonction pour scraper avec Playwright
 async function scrapeLeBonCoin(url) {
-  const browser = await puppeteer.launch({
+  const browser = await playwright.chromium.launch({
     headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--window-size=1920,1080',
-      '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    ]
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
 
   try {
-    const page = await browser.newPage();
-    
-    // Bloquer les images pour aller plus vite
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      if(req.resourceType() === 'image' || req.resourceType() === 'stylesheet' || req.resourceType() === 'font'){
-        req.abort();
-      } else {
-        req.continue();
-      }
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
-
+    
+    const page = await context.newPage();
+    
     // Aller sur la page
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     
-    // Attendre que les annonces se chargent
-    await page.waitForSelector('[data-test-id="ad"]', { timeout: 10000 });
+    // Attendre un peu
+    await page.waitForTimeout(3000);
     
-    // Extraire les données
-    const annonces = await page.evaluate(() => {
-      const results = [];
-      const items = document.querySelectorAll('[data-test-id="ad"]');
-      
-      items.forEach(item => {
-        const titleEl = item.querySelector('[data-test-id="ad-title"]');
-        const priceEl = item.querySelector('[data-test-id="price"]');
-        const locationEl = item.querySelector('[data-test-id="location"]');
-        const linkEl = item.querySelector('a');
-        const imageEl = item.querySelector('img');
+    // Extraire le HTML complet
+    const html = await page.content();
+    
+    // Extraire les annonces
+    const annonces = await page.$$eval('[data-test-id="ad"]', elements => {
+      return elements.map(el => {
+        const title = el.querySelector('[data-test-id="ad-title"]')?.textContent?.trim() || '';
+        const price = el.querySelector('[data-test-id="price"]')?.textContent?.trim() || '';
+        const location = el.querySelector('[data-test-id="location"]')?.textContent?.trim() || '';
+        const link = el.querySelector('a')?.href || '';
         
-        if (titleEl && linkEl) {
-          results.push({
-            titre: titleEl.innerText.trim(),
-            prix: priceEl ? priceEl.innerText.trim() : 'Prix non spécifié',
-            localisation: locationEl ? locationEl.innerText.trim() : '',
-            lien: linkEl.href,
-            image: imageEl ? imageEl.src : '',
-            // Chercher le numéro dans le titre ou la description
-            numeroVisible: null
-          });
-        }
+        return { title, price, location, link };
       });
-      
-      return results;
     });
 
     await browser.close();
@@ -75,7 +49,8 @@ async function scrapeLeBonCoin(url) {
       success: true,
       url: url,
       nombreAnnonces: annonces.length,
-      annonces: annonces
+      annonces: annonces,
+      htmlLength: html.length
     };
     
   } catch (error) {
@@ -93,6 +68,7 @@ app.post('/scrape', async (req, res) => {
       return res.status(400).json({ error: 'URL Le Bon Coin invalide' });
     }
 
+    console.log('Scraping:', url);
     const data = await scrapeLeBonCoin(url);
     res.json(data);
   } catch (error) {
@@ -103,9 +79,9 @@ app.post('/scrape', async (req, res) => {
 
 app.get('/', (req, res) => {
   res.json({
-    service: 'LeBonCoin Scraper API avec Puppeteer',
+    service: 'LeBonCoin Scraper avec Playwright',
     endpoints: {
-      'POST /scrape': 'Scraper Le Bon Coin (recherche ou annonce)'
+      'POST /scrape': 'Scraper Le Bon Coin'
     }
   });
 });
