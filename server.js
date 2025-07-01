@@ -1,5 +1,5 @@
 const express = require('express');
-const playwright = require('playwright');
+const axios = require('axios');
 const cors = require('cors');
 
 const app = express();
@@ -8,54 +8,44 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Fonction pour scraper avec Playwright
-async function scrapeLeBonCoin(url) {
-  const browser = await playwright.chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
+// Headers optimisés pour éviter la détection
+const getHeaders = () => ({
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+  'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Cache-Control': 'no-cache',
+  'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+  'Sec-Ch-Ua-Mobile': '?0',
+  'Sec-Ch-Ua-Platform': '"macOS"',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+  'Upgrade-Insecure-Requests': '1',
+  'Referer': 'https://www.google.com/'
+});
 
+// Fonction pour extraire les données du JSON dans la page
+function extractDataFromHtml(html) {
   try {
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    });
+    // Le Bon Coin met les données dans un script JSON
+    const scriptMatch = html.match(/window\.FLUX_STATE\s*=\s*({.*?})\s*;/s);
+    if (scriptMatch) {
+      const jsonData = JSON.parse(scriptMatch[1]);
+      return jsonData;
+    }
     
-    const page = await context.newPage();
+    // Méthode alternative
+    const dataMatch = html.match(/<script[^>]*>window\.__INITIAL_STATE__=({.*?})<\/script>/);
+    if (dataMatch) {
+      return JSON.parse(dataMatch[1]);
+    }
     
-    // Aller sur la page
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    
-    // Attendre un peu
-    await page.waitForTimeout(3000);
-    
-    // Extraire le HTML complet
-    const html = await page.content();
-    
-    // Extraire les annonces
-    const annonces = await page.$$eval('[data-test-id="ad"]', elements => {
-      return elements.map(el => {
-        const title = el.querySelector('[data-test-id="ad-title"]')?.textContent?.trim() || '';
-        const price = el.querySelector('[data-test-id="price"]')?.textContent?.trim() || '';
-        const location = el.querySelector('[data-test-id="location"]')?.textContent?.trim() || '';
-        const link = el.querySelector('a')?.href || '';
-        
-        return { title, price, location, link };
-      });
-    });
-
-    await browser.close();
-    
-    return {
-      success: true,
-      url: url,
-      nombreAnnonces: annonces.length,
-      annonces: annonces,
-      htmlLength: html.length
-    };
-    
+    return null;
   } catch (error) {
-    await browser.close();
-    throw error;
+    console.error('Erreur parsing JSON:', error);
+    return null;
   }
 }
 
@@ -69,20 +59,75 @@ app.post('/scrape', async (req, res) => {
     }
 
     console.log('Scraping:', url);
-    const data = await scrapeLeBonCoin(url);
-    res.json(data);
+    
+    // Ajouter un délai aléatoire
+    await new Promise(resolve => setTimeout(resolve, Math.random() * 2000 + 1000));
+    
+    const response = await axios.get(url, {
+      headers: getHeaders(),
+      timeout: 30000,
+      maxRedirects: 5,
+      validateStatus: (status) => status < 500
+    });
+    
+    if (response.status === 403) {
+      return res.status(403).json({ 
+        error: 'Accès refusé par Le Bon Coin',
+        suggestion: 'Utilisez un service de proxy ou attendez quelques minutes'
+      });
+    }
+    
+    const html = response.data;
+    const jsonData = extractDataFromHtml(html);
+    
+    // Extraire les annonces basiquement
+    const annonceMatches = html.match(/<a[^>]*href="\/[^"]*\/(\d{10,})\.htm"[^>]*>.*?<\/a>/g) || [];
+    const annonces = annonceMatches.map(match => {
+      const idMatch = match.match(/\/(\d{10,})\.htm/);
+      return {
+        id: idMatch ? idMatch[1] : null,
+        lien: `https://www.leboncoin.fr${match.match(/href="([^"]+)"/)[1]}`
+      };
+    }).filter(a => a.id);
+    
+    res.json({
+      success: true,
+      url: url,
+      nombreAnnonces: annonces.length,
+      annonces: annonces.slice(0, 20),
+      hasData: !!jsonData,
+      timestamp: new Date().toISOString()
+    });
+    
   } catch (error) {
-    console.error('Erreur:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Erreur:', error.message);
+    res.status(500).json({ 
+      error: error.message,
+      type: error.code || 'UNKNOWN_ERROR'
+    });
   }
+});
+
+// Route de test avec proxy
+app.post('/scrape-with-proxy', async (req, res) => {
+  res.json({
+    message: 'Pour un scraping fiable, utilisez un service comme ScrapingBee ou Scrapfly',
+    alternatives: [
+      'https://scrapingbee.com - 1000 requêtes gratuites',
+      'https://scrapfly.io - 1000 requêtes gratuites',
+      'https://scraperapi.com - 1000 requêtes gratuites'
+    ]
+  });
 });
 
 app.get('/', (req, res) => {
   res.json({
-    service: 'LeBonCoin Scraper avec Playwright',
+    service: 'LeBonCoin Scraper API',
     endpoints: {
-      'POST /scrape': 'Scraper Le Bon Coin'
-    }
+      'POST /scrape': 'Scraper Le Bon Coin',
+      'POST /scrape-with-proxy': 'Infos sur les proxies'
+    },
+    note: 'Le Bon Coin a des protections anti-scraping fortes'
   });
 });
 
