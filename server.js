@@ -1,21 +1,15 @@
 const express = require('express');
+const puppeteer = require('puppeteer');
 const cors = require('cors');
-// Puppeteer est déjà disponible dans l'image Docker
-let puppeteer;
-try {
-  puppeteer = require('puppeteer');
-} catch (e) {
-  // Chemin alternatif si le premier ne fonctionne pas
-  puppeteer = require('/usr/local/share/.config/yarn/global/node_modules/puppeteer');
-}
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+// Render fournit le PORT
+const PORT = process.env.PORT || 10000;
 
-// Configuration Puppeteer optimisée pour Docker
+// Configuration Puppeteer pour Render
 const browserConfig = {
   headless: 'new',
   args: [
@@ -23,12 +17,9 @@ const browserConfig = {
     '--disable-setuid-sandbox',
     '--disable-dev-shm-usage',
     '--disable-gpu',
-    '--no-first-run',
-    '--no-zygote',
     '--single-process',
-    '--disable-accelerated-2d-canvas'
-  ],
-  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable'
+    '--no-zygote'
+  ]
 };
 
 // Fonction de scraping avancée
@@ -96,16 +87,18 @@ async function scrapeLeBonCoin(url) {
         '[data-test-id="ad-card"]',
         '.styles_adCard__HQRFN',
         'a[href*="/ad/"]',
-        '[data-qa-id="aditem_container"]'
+        '[data-qa-id="aditem_container"]',
+        'article[data-test-id="ad"]',
+        '[data-test-id="aditem"]'
       ];
       
       for (const selector of selectors) {
         const elements = document.querySelectorAll(selector);
         if (elements.length > 0) {
           elements.forEach(el => {
-            const titleEl = el.querySelector('[data-test-id="ad-title"], .styles_title__HQRFN, h3, [data-qa-id="aditem_title"]');
-            const priceEl = el.querySelector('[data-test-id="price"], .styles_price__HQRFN, [data-qa-id="aditem_price"]');
-            const locationEl = el.querySelector('[data-test-id="location"], .styles_location__HQRFN, [data-qa-id="aditem_location"]');
+            const titleEl = el.querySelector('[data-test-id="ad-title"], .styles_title__HQRFN, h3, [data-qa-id="aditem_title"], p[data-test-id="ad-title"]');
+            const priceEl = el.querySelector('[data-test-id="price"], .styles_price__HQRFN, [data-qa-id="aditem_price"], span[data-test-id="price"]');
+            const locationEl = el.querySelector('[data-test-id="location"], .styles_location__HQRFN, [data-qa-id="aditem_location"], p[data-test-id="ad-location"]');
             const link = el.href || el.querySelector('a')?.href;
             
             if (titleEl && link) {
@@ -113,12 +106,18 @@ async function scrapeLeBonCoin(url) {
               const idMatch = link.match(/\/(\d{9,})\.htm/);
               const id = idMatch ? idMatch[1] : null;
               
+              // Extraire le numéro de téléphone si visible dans le titre ou ailleurs
+              const phoneRegex = /(?:(?:\+|00)33|0)\s*[1-9](?:[\s.-]*\d{2}){4}/g;
+              const textContent = el.textContent || '';
+              const phoneMatches = textContent.match(phoneRegex);
+              
               annonces.push({
                 id: id,
                 titre: titleEl.textContent.trim(),
                 prix: priceEl ? priceEl.textContent.trim() : 'Prix non spécifié',
                 localisation: locationEl ? locationEl.textContent.trim() : '',
-                lien: link.includes('http') ? link : `https://www.leboncoin.fr${link}`
+                lien: link.includes('http') ? link : `https://www.leboncoin.fr${link}`,
+                numeroTelephone: phoneMatches ? phoneMatches[0] : null
               });
             }
           });
@@ -126,26 +125,11 @@ async function scrapeLeBonCoin(url) {
         }
       }
       
-      // Extraire aussi depuis le JSON de la page si disponible
-      try {
-        const scripts = Array.from(document.querySelectorAll('script'));
-        for (const script of scripts) {
-          if (script.textContent.includes('window.FLUX_STATE')) {
-            const match = script.textContent.match(/window\.FLUX_STATE\s*=\s*({.*?});/s);
-            if (match) {
-              const fluxData = JSON.parse(match[1]);
-              console.log('FLUX_STATE trouvé');
-            }
-          }
-        }
-      } catch (e) {
-        console.error('Erreur parsing FLUX_STATE:', e);
-      }
-      
       return {
         annonces: annonces,
         pageTitle: document.title,
-        hasCloudflare: document.body.textContent.includes('Cloudflare')
+        hasCloudflare: document.body.textContent.includes('Cloudflare'),
+        totalResultsText: document.querySelector('[data-test-id="total-results"]')?.textContent || ''
       };
     });
     
@@ -157,7 +141,9 @@ async function scrapeLeBonCoin(url) {
       nombreAnnonces: data.annonces.length,
       annonces: data.annonces,
       pageTitle: data.pageTitle,
-      hasCloudflare: data.hasCloudflare
+      hasCloudflare: data.hasCloudflare,
+      totalResults: data.totalResultsText,
+      timestamp: new Date().toISOString()
     };
     
   } catch (error) {
@@ -167,7 +153,7 @@ async function scrapeLeBonCoin(url) {
   }
 }
 
-// Route principale
+// Route principale pour scraper
 app.post('/scrape', async (req, res) => {
   try {
     const { url } = req.body;
@@ -176,10 +162,12 @@ app.post('/scrape', async (req, res) => {
       return res.status(400).json({ error: 'URL Le Bon Coin invalide' });
     }
     
+    console.log(`[${new Date().toISOString()}] Scraping: ${url}`);
     const data = await scrapeLeBonCoin(url);
     res.json(data);
     
   } catch (error) {
+    console.error(`[${new Date().toISOString()}] Erreur:`, error.message);
     res.status(500).json({ 
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -187,16 +175,38 @@ app.post('/scrape', async (req, res) => {
   }
 });
 
-app.get('/', (req, res) => {
-  res.json({
-    service: 'LeBonCoin Scraper avec Puppeteer (Docker)',
-    endpoints: {
-      'POST /scrape': 'Scraper Le Bon Coin'
-    },
-    status: 'ready'
+// Route de santé
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    service: 'LeBonCoin Scraper'
   });
 });
 
+// Route d'accueil
+app.get('/', (req, res) => {
+  res.json({
+    service: 'LeBonCoin Scraper API',
+    version: '7.0.0',
+    endpoints: {
+      'POST /scrape': 'Scraper une page Le Bon Coin',
+      'GET /health': 'Vérifier le statut du service'
+    },
+    usage: {
+      method: 'POST',
+      url: '/scrape',
+      body: {
+        url: 'https://www.leboncoin.fr/recherche?text=...'
+      }
+    },
+    status: 'ready',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Démarrage du serveur
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Scraper API démarrée sur le port ${PORT}`);
+  console.log(`[${new Date().toISOString()}] Scraper API démarrée sur le port ${PORT}`);
+  console.log(`URL: http://0.0.0.0:${PORT}`);
 });
