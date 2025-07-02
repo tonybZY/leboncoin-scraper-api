@@ -36,13 +36,16 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 
 WORKDIR /app
 
-# Copier les fichiers
-COPY package*.json ./
-RUN npm ci --only=production
+# Copier seulement package.json d'abord
+COPY package.json ./
 
+# Utiliser npm install au lieu de npm ci
+RUN npm install --production
+
+# Copier le reste des fichiers
 COPY . .
 
-# Render utilise le port 10000 par défaut
+# Port pour Render
 EXPOSE 10000
 
 CMD ["node", "server.js"]
