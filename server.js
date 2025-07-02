@@ -1,248 +1,393 @@
-// Configuration Puppeteer VRAIMENT optimisée
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const express = require('express');
+const puppeteer = require('puppeteer');
+const cors = require('cors');
+const fs = require('fs').promises;
+const path = require('path');
 
-// Utiliser le plugin stealth (à installer : npm install puppeteer-extra puppeteer-extra-plugin-stealth)
-puppeteer.use(StealthPlugin());
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-// Configuration avancée
+const PORT = process.env.PORT || 10000;
+const COOKIES_FILE = path.join(__dirname, 'cookies.json');
+
+// Configuration Puppeteer optimisée
 const browserConfig = {
-  headless: false, // Mettre true en production, false pour débugger
+  headless: 'new',
   args: [
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-dev-shm-usage',
-    '--disable-accelerated-2d-canvas',
-    '--no-first-run',
-    '--no-zygote',
-    '--single-process',
     '--disable-gpu',
-    '--disable-blink-features=AutomationControlled',
+    '--disable-web-security',
     '--disable-features=IsolateOrigins,site-per-process',
-    '--window-size=1920,1080',
-    '--start-maximized',
-    '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    '--disable-blink-features=AutomationControlled',
+    '--window-size=1920,1080'
   ],
-  defaultViewport: null,
   executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable'
 };
 
-// Fonction avancée de scraping avec contournement
-async function scrapeWithBypass(url) {
+// Fonction pour sauvegarder les cookies
+async function saveCookies(cookies) {
+  try {
+    await fs.writeFile(COOKIES_FILE, JSON.stringify(cookies, null, 2));
+    console.log('Cookies sauvegardés');
+  } catch (error) {
+    console.error('Erreur sauvegarde cookies:', error);
+  }
+}
+
+// Fonction pour charger les cookies
+async function loadCookies() {
+  try {
+    const cookiesData = await fs.readFile(COOKIES_FILE, 'utf8');
+    return JSON.parse(cookiesData);
+  } catch (error) {
+    console.log('Pas de cookies existants');
+    return null;
+  }
+}
+
+// Fonction d'extraction avancée des contacts
+function extractContactsAdvanced(text) {
+  // Nettoyer le texte
+  const cleanText = text.replace(/\s+/g, ' ').toLowerCase();
+  
+  // Patterns pour téléphones français (plus robustes)
+  const phonePatterns = [
+    // Format international
+    /(?:\+33|0033)\s?[1-9](?:[\s.-]?\d{2}){4}/g,
+    // Format national avec séparateurs
+    /0[1-9](?:[\s.-]?\d{2}){4}/g,
+    // Format sans séparateurs
+    /0[1-9]\d{8}/g,
+    // Avec parenthèses
+    /0[1-9]\s?\(\d{2}\)\s?\d{2}[\s.-]?\d{2}[\s.-]?\d{2}/g,
+    // Format court parfois utilisé
+    /(?:tél|tel|téléphone|phone|mobile|portable)[\s:]+?(0[1-9][\s.-]?\d{2}[\s.-]?\d{2}[\s.-]?\d{2}[\s.-]?\d{2})/gi
+  ];
+  
+  // Patterns pour emails
+  const emailPatterns = [
+    /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+    /[a-zA-Z0-9._%+-]+\s?(?:arobase|at)\s?[a-zA-Z0-9.-]+\s?(?:point|dot)\s?[a-zA-Z]{2,}/gi
+  ];
+  
+  let phones = new Set();
+  let emails = new Set();
+  
+  // Extraire téléphones
+  phonePatterns.forEach(pattern => {
+    const matches = text.match(pattern) || [];
+    matches.forEach(match => {
+      // Normaliser le numéro
+      let normalized = match.replace(/[^\d+]/g, '');
+      if (normalized.startsWith('33')) {
+        normalized = '0' + normalized.slice(2);
+      }
+      if (normalized.length === 10 && normalized.startsWith('0')) {
+        phones.add(normalized);
+      }
+    });
+  });
+  
+  // Extraire emails
+  emailPatterns.forEach(pattern => {
+    const matches = text.match(pattern) || [];
+    matches.forEach(match => {
+      // Nettoyer l'email
+      let email = match.toLowerCase()
+        .replace(/\s?arobase\s?/gi, '@')
+        .replace(/\s?point\s?/gi, '.')
+        .replace(/\s+/g, '');
+      
+      // Valider format basique
+      if (email.includes('@') && email.includes('.')) {
+        emails.add(email);
+      }
+    });
+  });
+  
+  return {
+    phones: Array.from(phones),
+    emails: Array.from(emails)
+  };
+}
+
+// Fonction principale de scraping avec cookies
+async function scrapeLeBonCoinWithCookies(url) {
   let browser;
   try {
     browser = await puppeteer.launch(browserConfig);
     const page = await browser.newPage();
     
-    // Injection de scripts anti-détection avancés
+    // Configuration du navigateur
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
+    // Anti-détection
     await page.evaluateOnNewDocument(() => {
-      // Override de nombreuses propriétés
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined
-      });
-      
-      // Mock Chrome
-      window.navigator.chrome = {
-        runtime: {},
-        loadTimes: function() {},
-        csi: function() {},
-        app: {}
-      };
-      
-      // Override permissions
-      const originalQuery = window.navigator.permissions.query;
-      window.navigator.permissions.query = (parameters) => (
-        parameters.name === 'notifications' ?
-          Promise.resolve({ state: Notification.permission }) :
-          originalQuery(parameters)
-      );
-      
-      // Plugins
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       Object.defineProperty(navigator, 'plugins', {
-        get: () => [
-          { name: 'Chrome PDF Plugin' },
-          { name: 'Chrome PDF Viewer' },
-          { name: 'Native Client' }
-        ]
+        get: () => [1, 2, 3, 4, 5]
       });
-      
-      // Languages
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['fr-FR', 'fr', 'en-US', 'en']
-      });
-      
-      // WebGL Vendor
-      const getParameter = WebGLRenderingContext.prototype.getParameter;
-      WebGLRenderingContext.prototype.getParameter = function(parameter) {
-        if (parameter === 37445) {
-          return 'Intel Inc.';
-        }
-        if (parameter === 37446) {
-          return 'Intel Iris OpenGL Engine';
-        }
-        return getParameter(parameter);
-      };
+      window.chrome = { runtime: {} };
     });
     
-    // Cookies et headers réalistes
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache',
-      'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-      'Sec-Ch-Ua-Mobile': '?0',
-      'Sec-Ch-Ua-Platform': '"Windows"',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Dest': 'document',
-      'Upgrade-Insecure-Requests': '1'
-    });
-    
-    // Comportement humain simulé
-    await page.setViewport({
-      width: 1920 + Math.floor(Math.random() * 100),
-      height: 1080 + Math.floor(Math.random() * 100),
-      deviceScaleFactor: 1,
-      hasTouch: false,
-      isLandscape: true,
-      isMobile: false
-    });
-    
-    console.log('Navigation avec comportement humain...');
-    
-    // Navigation progressive
-    await page.goto('https://www.leboncoin.fr', { 
-      waitUntil: 'networkidle0',
-      timeout: 30000 
-    });
-    
-    // Attendre comme un humain
-    await page.waitForTimeout(2000 + Math.random() * 2000);
-    
-    // Mouvement de souris aléatoire
-    await page.mouse.move(
-      Math.random() * 1920,
-      Math.random() * 1080
-    );
-    
-    // Maintenant naviguer vers l'URL cible
-    await page.goto(url, { 
-      waitUntil: 'networkidle0',
-      timeout: 60000 
-    });
-    
-    // Attendre et scroller comme un humain
-    await page.waitForTimeout(3000 + Math.random() * 2000);
-    
-    // Scroll progressif
-    await page.evaluate(() => {
-      return new Promise((resolve) => {
-        let totalHeight = 0;
-        const distance = 100;
-        const timer = setInterval(() => {
-          const scrollHeight = document.body.scrollHeight;
-          window.scrollBy(0, distance);
-          totalHeight += distance;
-          
-          if (totalHeight >= scrollHeight) {
-            clearInterval(timer);
-            resolve();
-          }
-        }, 100);
-      });
-    });
-    
-    // Attendre que tout soit chargé
-    await page.waitForTimeout(2000);
-    
-    // Vérifier si on est bloqué
-    const isBlocked = await page.evaluate(() => {
-      const text = document.body.innerText.toLowerCase();
-      return text.includes('access denied') || 
-             text.includes('cloudflare') ||
-             text.includes('checking your browser');
-    });
-    
-    if (isBlocked) {
-      console.log('Détection Cloudflare... Attente...');
-      await page.waitForTimeout(10000);
-      
-      // Réessayer de récupérer le contenu
-      const html = await page.content();
-      const newBlocked = html.toLowerCase().includes('cloudflare');
-      
-      if (newBlocked) {
-        throw new Error('Bloqué par Cloudflare même après attente');
-      }
+    // Charger les cookies s'ils existent
+    const savedCookies = await loadCookies();
+    if (savedCookies) {
+      console.log('Chargement des cookies existants...');
+      await page.setCookie(...savedCookies);
     }
     
-    // Récupérer le HTML final
-    const html = await page.content();
-    const cookies = await page.cookies();
+    console.log('Navigation vers:', url);
     
-    // Screenshot pour debug (optionnel)
-    // await page.screenshot({ path: 'debug.png', fullPage: true });
+    // Navigation avec gestion d'erreurs
+    try {
+      await page.goto(url, { 
+        waitUntil: 'networkidle2', 
+        timeout: 60000 
+      });
+    } catch (navError) {
+      console.log('Erreur navigation, tentative avec waitUntil: domcontentloaded');
+      await page.goto(url, { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 30000 
+      });
+    }
+    
+    // Attendre le chargement
+    await page.waitForTimeout(3000);
+    
+    // Sauvegarder les nouveaux cookies
+    const cookies = await page.cookies();
+    await saveCookies(cookies);
+    
+    // Vérifier si on est bloqué
+    const pageContent = await page.content();
+    const isBlocked = pageContent.toLowerCase().includes('cloudflare') || 
+                      pageContent.includes('Access denied');
+    
+    if (isBlocked) {
+      console.log('Page bloquée détectée, attente...');
+      await page.waitForTimeout(5000);
+    }
+    
+    // Extraction des données selon le type de page
+    let result = {
+      success: true,
+      url: url,
+      timestamp: new Date().toISOString()
+    };
+    
+    // Si c'est une page d'annonce individuelle
+    if (url.includes('/ad/') || url.includes('/voitures/')) {
+      console.log('Scraping annonce individuelle...');
+      
+      // Essayer de cliquer sur le bouton téléphone si présent
+      try {
+        const phoneButton = await page.$('[data-qa-id="adview_contact_phone_button"]');
+        if (phoneButton) {
+          console.log('Bouton téléphone trouvé, clic...');
+          await phoneButton.click();
+          await page.waitForTimeout(2000);
+        }
+      } catch (e) {
+        console.log('Pas de bouton téléphone ou erreur clic');
+      }
+      
+      // Extraire toutes les données
+      const annonceData = await page.evaluate(() => {
+        // Titre
+        const titleEl = document.querySelector('h1') || 
+                       document.querySelector('[data-qa-id="adview_title"]');
+        const title = titleEl ? titleEl.innerText : '';
+        
+        // Prix
+        const priceEl = document.querySelector('[data-qa-id="adview_price"]') ||
+                       document.querySelector('[data-test-id="price"]');
+        const price = priceEl ? priceEl.innerText : '';
+        
+        // Description
+        const descEl = document.querySelector('[data-qa-id="adview_description_container"]') ||
+                      document.querySelector('[data-test-id="description"]');
+        const description = descEl ? descEl.innerText : '';
+        
+        // Vendeur
+        const sellerEl = document.querySelector('[data-qa-id="adview_profile_name"]');
+        const sellerName = sellerEl ? sellerEl.innerText : '';
+        
+        // Localisation
+        const locationEl = document.querySelector('[data-qa-id="adview_location"]');
+        const location = locationEl ? locationEl.innerText : '';
+        
+        // Numéro affiché après clic
+        const phoneEl = document.querySelector('[data-qa-id="adview_contact_phone_number"]');
+        const phoneFromButton = phoneEl ? phoneEl.innerText : '';
+        
+        // Tout le texte de la page pour extraction
+        const fullText = document.body.innerText;
+        
+        return {
+          title,
+          price,
+          description,
+          sellerName,
+          location,
+          phoneFromButton,
+          fullText
+        };
+      });
+      
+      // Extraire les contacts du texte complet
+      const contacts = extractContactsAdvanced(annonceData.fullText);
+      
+      // Si on a trouvé un numéro via le bouton, l'ajouter
+      if (annonceData.phoneFromButton) {
+        const cleanPhone = annonceData.phoneFromButton.replace(/[^\d]/g, '');
+        if (cleanPhone.length === 10) {
+          contacts.phones.unshift(cleanPhone);
+        }
+      }
+      
+      result = {
+        ...result,
+        type: 'annonce',
+        data: {
+          title: annonceData.title,
+          price: annonceData.price,
+          location: annonceData.location,
+          sellerName: annonceData.sellerName,
+          description: annonceData.description.substring(0, 500) + '...',
+          contacts: {
+            phones: [...new Set(contacts.phones)],
+            emails: [...new Set(contacts.emails)]
+          }
+        },
+        html: pageContent
+      };
+      
+    } else if (url.includes('/recherche') || url.includes('text=')) {
+      // Page de recherche
+      console.log('Scraping page de recherche...');
+      
+      const annonces = await page.evaluate(() => {
+        const items = [];
+        const selectors = [
+          'a[data-test-id="ad"]',
+          '[data-qa-id="aditem_container"]',
+          'article[data-test-id="ad"]'
+        ];
+        
+        for (const selector of selectors) {
+          const elements = document.querySelectorAll(selector);
+          if (elements.length > 0) {
+            elements.forEach(el => {
+              const link = el.href || el.querySelector('a')?.href;
+              const title = el.querySelector('[data-test-id="ad-title"]')?.innerText || '';
+              const price = el.querySelector('[data-test-id="price"]')?.innerText || '';
+              const location = el.querySelector('[data-test-id="ad-location"]')?.innerText || '';
+              
+              if (link && title) {
+                items.push({ title, price, location, link });
+              }
+            });
+            break;
+          }
+        }
+        
+        return items;
+      });
+      
+      result = {
+        ...result,
+        type: 'recherche',
+        nombreAnnonces: annonces.length,
+        annonces: annonces
+      };
+    }
     
     await browser.close();
-    
-    return {
-      success: true,
-      html: html,
-      htmlLength: html.length,
-      cookies: cookies,
-      blocked: false
-    };
+    return result;
     
   } catch (error) {
     if (browser) await browser.close();
+    console.error('Erreur scraping:', error);
     throw error;
   }
 }
 
-// Alternative : Utiliser un proxy résidentiel
-async function scrapeWithProxy(url, proxyUrl) {
-  const browser = await puppeteer.launch({
-    ...browserConfig,
-    args: [
-      ...browserConfig.args,
-      `--proxy-server=${proxyUrl}`
-    ]
-  });
-  
-  // Suite du code...
-}
+// Routes API
 
-// Alternative : Utiliser playwright (plus difficile à détecter)
-// npm install playwright
-const { chromium } = require('playwright');
-
-async function scrapeWithPlaywright(url) {
-  const browser = await chromium.launch({
-    headless: false,
-    args: ['--disable-blink-features=AutomationControlled']
-  });
-  
-  const context = await browser.newContext({
-    viewport: { width: 1920, height: 1080 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    locale: 'fr-FR',
-    timezoneId: 'Europe/Paris'
-  });
-  
-  const page = await context.newPage();
-  
-  // Injection anti-détection
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined
+// Route principale
+app.post('/scrape', async (req, res) => {
+  try {
+    const { url } = req.body;
+    
+    if (!url || !url.includes('leboncoin.fr')) {
+      return res.status(400).json({ 
+        error: 'URL invalide. Fournissez une URL leboncoin.fr' 
+      });
+    }
+    
+    console.log(`[${new Date().toISOString()}] Scraping: ${url}`);
+    const result = await scrapeLeBonCoinWithCookies(url);
+    
+    console.log('Scraping terminé avec succès');
+    res.json(result);
+    
+  } catch (error) {
+    console.error('Erreur:', error.message);
+    res.status(500).json({ 
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
+  }
+});
+
+// Route pour réinitialiser les cookies
+app.post('/reset-cookies', async (req, res) => {
+  try {
+    await fs.unlink(COOKIES_FILE);
+    res.json({ message: 'Cookies supprimés' });
+  } catch (error) {
+    res.json({ message: 'Pas de cookies à supprimer' });
+  }
+});
+
+// Route de santé
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    service: 'LeBonCoin Scraper Pro',
+    version: '2.0.0',
+    features: ['cookies', 'anti-detection', 'contacts-extraction'],
+    timestamp: new Date().toISOString()
   });
-  
-  await page.goto(url);
-  const html = await page.content();
-  
-  await browser.close();
-  return html;
-}
+});
+
+// Route d'accueil
+app.get('/', (req, res) => {
+  res.json({
+    service: 'LeBonCoin Scraper Pro',
+    endpoints: {
+      'POST /scrape': 'Scraper une page (annonce ou recherche)',
+      'POST /reset-cookies': 'Réinitialiser les cookies',
+      'GET /health': 'Statut du service'
+    },
+    exemple: {
+      url: '/scrape',
+      method: 'POST',
+      body: {
+        url: 'https://www.leboncoin.fr/ad/voitures/2990778250'
+      }
+    }
+  });
+});
+
+// Démarrage
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 LeBonCoin Scraper Pro démarré sur le port ${PORT}`);
+  console.log(`URL: http://0.0.0.0:${PORT}`);
+});
