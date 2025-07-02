@@ -9,7 +9,7 @@ app.use(express.json());
 // Render fournit le PORT
 const PORT = process.env.PORT || 10000;
 
-// Configuration Puppeteer pour Render
+// Configuration Puppeteer optimisée pour Render
 const browserConfig = {
   headless: 'new',
   args: [
@@ -18,12 +18,110 @@ const browserConfig = {
     '--disable-dev-shm-usage',
     '--disable-gpu',
     '--single-process',
-    '--no-zygote'
-  ]
+    '--no-zygote',
+    '--disable-web-security',
+    '--disable-features=IsolateOrigins,site-per-process',
+    '--disable-blink-features=AutomationControlled'
+  ],
+  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable'
 };
 
-// Fonction de scraping avancée
-async function scrapeLeBonCoin(url) {
+// Fonction pour extraire emails et téléphones d'un texte
+function extractContactInfo(text) {
+  // Patterns pour les numéros de téléphone français
+  const phonePatterns = [
+    /(?:(?:\+|00)33[\s.-]?(?:\(0\))?|0)[1-9](?:[\s.-]?\d{2}){4}/g,
+    /0[1-9](?:[0-9]{2}){4}/g,
+    /(?:\+33|0033)[1-9]\d{8}/g
+  ];
+  
+  // Pattern pour les emails
+  const emailPattern = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  
+  let phones = [];
+  let emails = [];
+  
+  // Extraire les téléphones
+  phonePatterns.forEach(pattern => {
+    const matches = text.match(pattern);
+    if (matches) {
+      phones.push(...matches);
+    }
+  });
+  
+  // Extraire les emails
+  const emailMatches = text.match(emailPattern);
+  if (emailMatches) {
+    emails.push(...emailMatches);
+  }
+  
+  // Nettoyer et dédupliquer
+  phones = [...new Set(phones.map(p => p.replace(/[\s.-]/g, '')))];
+  emails = [...new Set(emails.map(e => e.toLowerCase()))];
+  
+  return { phones, emails };
+}
+
+// Fonction pour scraper une annonce individuelle
+async function scrapeAnnonceDetail(page, url) {
+  try {
+    await page.goto(url, { 
+      waitUntil: 'networkidle2', 
+      timeout: 30000 
+    });
+    
+    await page.waitForTimeout(2000);
+    
+    const details = await page.evaluate(() => {
+      // Récupérer tout le texte de la page
+      const pageText = document.body.innerText || '';
+      
+      // Essayer de trouver le bouton téléphone
+      const phoneButton = document.querySelector('[data-qa-id="adview_contact_phone_button"]');
+      
+      // Récupérer la description
+      const description = document.querySelector('[data-qa-id="adview_description_container"]')?.innerText || '';
+      
+      // Récupérer le nom du vendeur
+      const sellerName = document.querySelector('[data-qa-id="adview_profile_name"]')?.innerText || '';
+      
+      return {
+        pageText,
+        description,
+        sellerName,
+        hasPhoneButton: !!phoneButton
+      };
+    });
+    
+    // Si il y a un bouton téléphone, essayer de cliquer dessus
+    if (details.hasPhoneButton) {
+      try {
+        await page.click('[data-qa-id="adview_contact_phone_button"]');
+        await page.waitForTimeout(2000);
+        
+        // Récupérer le numéro après le clic
+        const phoneNumber = await page.evaluate(() => {
+          const phoneEl = document.querySelector('[data-qa-id="adview_contact_phone_number"]');
+          return phoneEl ? phoneEl.innerText : null;
+        });
+        
+        if (phoneNumber) {
+          details.phoneFromButton = phoneNumber;
+        }
+      } catch (e) {
+        console.log('Impossible de cliquer sur le bouton téléphone');
+      }
+    }
+    
+    return details;
+  } catch (error) {
+    console.error('Erreur lors du scraping de l\'annonce:', error);
+    return null;
+  }
+}
+
+// Fonction de scraping principale
+async function scrapeLeBonCoin(url, options = {}) {
   let browser;
   try {
     browser = await puppeteer.launch(browserConfig);
@@ -36,115 +134,110 @@ async function scrapeLeBonCoin(url) {
     // Éviter la détection
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
       window.chrome = { runtime: {} };
-      Object.defineProperty(navigator, 'permissions', {
-        get: () => ({
-          query: () => Promise.resolve({ state: 'granted' })
-        })
-      });
     });
     
-    // Intercepter les requêtes inutiles
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      const resourceType = req.resourceType();
-      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-    
-    // Navigation avec gestion des erreurs
     console.log('Navigation vers:', url);
     await page.goto(url, { 
-      waitUntil: 'domcontentloaded', 
+      waitUntil: 'networkidle2', 
       timeout: 60000 
     });
     
-    // Attendre que la page soit chargée
     await page.waitForTimeout(3000);
     
-    // Vérifier si on est bloqué
-    const isBlocked = await page.evaluate(() => {
-      return document.body.textContent.includes('Access denied') || 
-             document.title.includes('Attention Required');
-    });
-    
-    if (isBlocked) {
-      console.log('Détection Cloudflare, tentative de contournement...');
-      await page.waitForTimeout(5000);
-    }
-    
-    // Extraire les données
-    const data = await page.evaluate(() => {
-      const annonces = [];
+    // Si c'est une page de recherche
+    if (url.includes('/recherche') || url.includes('text=')) {
+      const data = await page.evaluate(() => {
+        const annonces = [];
+        
+        // Sélecteurs pour les annonces
+        const selectors = [
+          'a[data-test-id="ad"]',
+          '[data-qa-id="aditem_container"]',
+          'article[data-test-id="ad"]'
+        ];
+        
+        for (const selector of selectors) {
+          const elements = document.querySelectorAll(selector);
+          if (elements.length > 0) {
+            elements.forEach(el => {
+              const titleEl = el.querySelector('[data-test-id="ad-title"], [data-qa-id="aditem_title"]');
+              const priceEl = el.querySelector('[data-test-id="price"], [data-qa-id="aditem_price"]');
+              const locationEl = el.querySelector('[data-test-id="ad-location"], [data-qa-id="aditem_location"]');
+              const link = el.href || el.querySelector('a')?.href;
+              
+              if (titleEl && link) {
+                annonces.push({
+                  titre: titleEl.textContent.trim(),
+                  prix: priceEl ? priceEl.textContent.trim() : 'Prix non spécifié',
+                  localisation: locationEl ? locationEl.textContent.trim() : '',
+                  lien: link.includes('http') ? link : `https://www.leboncoin.fr${link}`
+                });
+              }
+            });
+            break;
+          }
+        }
+        
+        return annonces;
+      });
       
-      // Sélecteurs multiples pour plus de robustesse
-      const selectors = [
-        'a[data-test-id="ad"]',
-        '[data-test-id="ad-card"]',
-        '.styles_adCard__HQRFN',
-        'a[href*="/ad/"]',
-        '[data-qa-id="aditem_container"]',
-        'article[data-test-id="ad"]',
-        '[data-test-id="aditem"]'
-      ];
-      
-      for (const selector of selectors) {
-        const elements = document.querySelectorAll(selector);
-        if (elements.length > 0) {
-          elements.forEach(el => {
-            const titleEl = el.querySelector('[data-test-id="ad-title"], .styles_title__HQRFN, h3, [data-qa-id="aditem_title"], p[data-test-id="ad-title"]');
-            const priceEl = el.querySelector('[data-test-id="price"], .styles_price__HQRFN, [data-qa-id="aditem_price"], span[data-test-id="price"]');
-            const locationEl = el.querySelector('[data-test-id="location"], .styles_location__HQRFN, [data-qa-id="aditem_location"], p[data-test-id="ad-location"]');
-            const link = el.href || el.querySelector('a')?.href;
+      // Si demandé, scraper les détails de chaque annonce
+      if (options.scrapeDetails && data.length > 0) {
+        const limit = Math.min(data.length, options.maxDetails || 5);
+        
+        for (let i = 0; i < limit; i++) {
+          console.log(`Scraping détails annonce ${i + 1}/${limit}`);
+          const details = await scrapeAnnonceDetail(page, data[i].lien);
+          
+          if (details) {
+            const contactInfo = extractContactInfo(
+              details.pageText + ' ' + details.description
+            );
             
-            if (titleEl && link) {
-              // Extraire le numéro de l'annonce
-              const idMatch = link.match(/\/(\d{9,})\.htm/);
-              const id = idMatch ? idMatch[1] : null;
-              
-              // Extraire le numéro de téléphone si visible dans le titre ou ailleurs
-              const phoneRegex = /(?:(?:\+|00)33|0)\s*[1-9](?:[\s.-]*\d{2}){4}/g;
-              const textContent = el.textContent || '';
-              const phoneMatches = textContent.match(phoneRegex);
-              
-              annonces.push({
-                id: id,
-                titre: titleEl.textContent.trim(),
-                prix: priceEl ? priceEl.textContent.trim() : 'Prix non spécifié',
-                localisation: locationEl ? locationEl.textContent.trim() : '',
-                lien: link.includes('http') ? link : `https://www.leboncoin.fr${link}`,
-                numeroTelephone: phoneMatches ? phoneMatches[0] : null
-              });
-            }
-          });
-          break;
+            data[i].details = {
+              ...contactInfo,
+              sellerName: details.sellerName,
+              phoneFromButton: details.phoneFromButton
+            };
+          }
+          
+          // Pause entre les requêtes
+          await page.waitForTimeout(2000);
         }
       }
       
+      await browser.close();
+      
       return {
-        annonces: annonces,
-        pageTitle: document.title,
-        hasCloudflare: document.body.textContent.includes('Cloudflare'),
-        totalResultsText: document.querySelector('[data-test-id="total-results"]')?.textContent || ''
+        success: true,
+        url: url,
+        nombreAnnonces: data.length,
+        annonces: data,
+        timestamp: new Date().toISOString()
       };
-    });
-    
-    await browser.close();
-    
-    return {
-      success: true,
-      url: url,
-      nombreAnnonces: data.annonces.length,
-      annonces: data.annonces,
-      pageTitle: data.pageTitle,
-      hasCloudflare: data.hasCloudflare,
-      totalResults: data.totalResultsText,
-      timestamp: new Date().toISOString()
-    };
+      
+    } else {
+      // Si c'est une annonce individuelle
+      const details = await scrapeAnnonceDetail(page, url);
+      const contactInfo = details ? extractContactInfo(
+        details.pageText + ' ' + details.description
+      ) : { phones: [], emails: [] };
+      
+      await browser.close();
+      
+      return {
+        success: true,
+        url: url,
+        type: 'annonce_individuelle',
+        details: {
+          ...contactInfo,
+          sellerName: details?.sellerName,
+          phoneFromButton: details?.phoneFromButton
+        },
+        timestamp: new Date().toISOString()
+      };
+    }
     
   } catch (error) {
     if (browser) await browser.close();
@@ -153,21 +246,32 @@ async function scrapeLeBonCoin(url) {
   }
 }
 
+// Middleware de logging
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  if (req.method === 'POST') {
+    console.log('Body:', req.body);
+  }
+  next();
+});
+
 // Route principale pour scraper
 app.post('/scrape', async (req, res) => {
   try {
-    const { url } = req.body;
+    const { url, scrapeDetails = false, maxDetails = 5 } = req.body;
     
     if (!url || !url.includes('leboncoin.fr')) {
       return res.status(400).json({ error: 'URL Le Bon Coin invalide' });
     }
     
-    console.log(`[${new Date().toISOString()}] Scraping: ${url}`);
-    const data = await scrapeLeBonCoin(url);
+    console.log(`Début du scraping: ${url}`);
+    const data = await scrapeLeBonCoin(url, { scrapeDetails, maxDetails });
+    
+    console.log(`Scraping terminé: ${data.nombreAnnonces || 1} résultat(s)`);
     res.json(data);
     
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Erreur:`, error.message);
+    console.error('Erreur:', error.message);
     res.status(500).json({ 
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -180,15 +284,16 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    service: 'LeBonCoin Scraper'
+    service: 'LeBonCoin Scraper Enhanced',
+    features: ['emails', 'phones', 'details']
   });
 });
 
 // Route d'accueil
 app.get('/', (req, res) => {
   res.json({
-    service: 'LeBonCoin Scraper API',
-    version: '7.0.0',
+    service: 'LeBonCoin Scraper API Enhanced',
+    version: '8.0.0',
     endpoints: {
       'POST /scrape': 'Scraper une page Le Bon Coin',
       'GET /health': 'Vérifier le statut du service'
@@ -197,16 +302,45 @@ app.get('/', (req, res) => {
       method: 'POST',
       url: '/scrape',
       body: {
-        url: 'https://www.leboncoin.fr/recherche?text=...'
+        url: 'https://www.leboncoin.fr/recherche?text=...',
+        scrapeDetails: true,  // Optionnel: récupérer emails/téléphones
+        maxDetails: 5         // Optionnel: nombre max d'annonces à détailler
       }
     },
+    features: [
+      'Extraction des annonces',
+      'Extraction des emails',
+      'Extraction des numéros de téléphone',
+      'Scraping des détails individuels'
+    ],
     status: 'ready',
     timestamp: new Date().toISOString()
   });
 });
 
+// Route 404
+app.use((req, res) => {
+  res.status(404).json({ 
+    error: 'Endpoint non trouvé',
+    availableEndpoints: ['GET /', 'GET /health', 'POST /scrape']
+  });
+});
+
 // Démarrage du serveur
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[${new Date().toISOString()}] Scraper API démarrée sur le port ${PORT}`);
-  console.log(`URL: http://0.0.0.0:${PORT}`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[${new Date().toISOString()}] 🚀 Scraper API démarrée sur le port ${PORT}`);
+  console.log(`URL locale: http://0.0.0.0:${PORT}`);
+  console.log('Endpoints disponibles:');
+  console.log('  - GET  / (infos)');
+  console.log('  - GET  /health (santé)');
+  console.log('  - POST /scrape (scraper)');
+});
+
+// Gestion propre de l'arrêt
+process.on('SIGTERM', () => {
+  console.log('SIGTERM reçu, fermeture...');
+  server.close(() => {
+    console.log('Serveur fermé');
+    process.exit(0);
+  });
 });
